@@ -9,7 +9,7 @@
 
 # Global state
 .mrp_env <- new.env(parent = emptyenv())
-.mrp_env$sessions <- list()
+.mrp_env$runtime <- NULL
 .mrp_env$pending_inputs <- list()
 .mrp_env$input_values <- list()
 
@@ -17,7 +17,7 @@
 #'
 #' @param host Host to bind to (default: "127.0.0.1")
 #' @param port Port to bind to (default: 8001)
-#' @param cwd Working directory for R sessions (default: getwd())
+#' @param cwd Working directory for the R runtime (default: getwd())
 #' @param blocking If TRUE, block until server is stopped (default: TRUE)
 #' @export
 start_server <- function(host = "127.0.0.1", port = 8001, cwd = getwd(), blocking = TRUE) {
@@ -40,13 +40,14 @@ start_server <- function(host = "127.0.0.1", port = 8001, cwd = getwd(), blockin
   server <- httpuv::startServer(host, port, app)
   .mrp_env$server <- server
 
-  message("\nServer started. Press Ctrl+C to stop.")
+  # Initialize runtime
+  init_runtime()
 
+  message("\nServer started. Press Ctrl+C to stop.")
 
   if (blocking) {
     on.exit({
       message("\nShutting down...")
-      shutdown_all_sessions()
       httpuv::stopServer(server)
     })
 
@@ -64,9 +65,9 @@ start_server <- function(host = "127.0.0.1", port = 8001, cwd = getwd(), blockin
 #' @export
 stop_server <- function() {
   if (!is.null(.mrp_env$server)) {
-    shutdown_all_sessions()
     httpuv::stopServer(.mrp_env$server)
     .mrp_env$server <- NULL
+    .mrp_env$runtime <- NULL
     message("Server stopped.")
   }
 }
@@ -110,19 +111,8 @@ route_request <- function(req) {
   result <- tryCatch({
     if (path == "/mrp/v1/capabilities" && method == "GET") {
       handle_capabilities()
-    } else if (path == "/mrp/v1/sessions" && method == "GET") {
-      handle_list_sessions()
-    } else if (path == "/mrp/v1/sessions" && method == "POST") {
-      handle_create_session(body)
-    } else if (grepl("^/mrp/v1/sessions/[^/]+$", path) && method == "GET") {
-      session_id <- sub("^/mrp/v1/sessions/", "", path)
-      handle_get_session(session_id)
-    } else if (grepl("^/mrp/v1/sessions/[^/]+$", path) && method == "DELETE") {
-      session_id <- sub("^/mrp/v1/sessions/", "", path)
-      handle_delete_session(session_id)
-    } else if (grepl("^/mrp/v1/sessions/[^/]+/reset$", path) && method == "POST") {
-      session_id <- sub("^/mrp/v1/sessions/([^/]+)/reset$", "\\1", path)
-      handle_reset_session(session_id)
+    } else if (path == "/mrp/v1/reset" && method == "POST") {
+      handle_reset()
     } else if (path == "/mrp/v1/execute" && method == "POST") {
       handle_execute(body)
     } else if (path == "/mrp/v1/execute/stream" && method == "POST") {
@@ -148,6 +138,8 @@ route_request <- function(req) {
       handle_is_complete(body)
     } else if (path == "/mrp/v1/format" && method == "POST") {
       handle_format(body)
+    } else if (path == "/mrp/v1/history" && method == "POST") {
+      handle_history(body)
     } else if (grepl("^/mrp/v1/assets/", path) && method == "GET") {
       asset_path <- sub("^/mrp/v1/assets/", "", path)
       handle_assets(asset_path)
@@ -202,11 +194,10 @@ handle_capabilities <- function() {
       reset = TRUE,
       isComplete = TRUE,
       format = FALSE,
+      history = TRUE,
       assets = TRUE
     ),
     lspFallback = NULL,
-    defaultSession = "default",
-    maxSessions = 10L,
     environment = list(
       cwd = .mrp_env$cwd,
       executable = .mrp_env$r_executable,
@@ -215,89 +206,11 @@ handle_capabilities <- function() {
   )
 }
 
-#' Handle GET /sessions
+#' Handle POST /reset
 #' @keywords internal
-handle_list_sessions <- function() {
-  sessions_info <- lapply(names(.mrp_env$sessions), function(id) {
-    session <- .mrp_env$sessions[[id]]
-    list(
-      id = id,
-      language = "r",
-      created = session$created,
-      lastActivity = session$last_activity,
-      executionCount = session$execution_count,
-      variableCount = length(ls(session$env))
-    )
-  })
-  list(sessions = sessions_info)
-}
-
-#' Handle POST /sessions
-#' @keywords internal
-handle_create_session <- function(body) {
-  session_id <- body$id %||% sprintf("session-%s", as.numeric(Sys.time()))
-
-  if (session_id %in% names(.mrp_env$sessions)) {
-    return(list(error = sprintf("Session %s already exists", session_id), status = 409L))
-  }
-
-  session <- create_session(session_id)
-  .mrp_env$sessions[[session_id]] <- session
-
-  list(
-    id = session_id,
-    language = "r",
-    created = session$created,
-    lastActivity = session$last_activity,
-    executionCount = 0L,
-    variableCount = 0L,
-    status = 201L
-  )
-}
-
-#' Handle GET /sessions/{id}
-#' @keywords internal
-handle_get_session <- function(session_id) {
-  session <- .mrp_env$sessions[[session_id]]
-  if (is.null(session)) {
-    return(list(error = sprintf("Session %s not found", session_id), status = 404L))
-  }
-
-  list(
-    id = session_id,
-    language = "r",
-    created = session$created,
-    lastActivity = session$last_activity,
-    executionCount = session$execution_count,
-    variableCount = length(ls(session$env))
-  )
-}
-
-#' Handle DELETE /sessions/{id}
-#' @keywords internal
-handle_delete_session <- function(session_id) {
-  if (!(session_id %in% names(.mrp_env$sessions))) {
-    return(list(error = sprintf("Session %s not found", session_id), status = 404L))
-  }
-
-  .mrp_env$sessions[[session_id]] <- NULL
-  list(deleted = TRUE)
-}
-
-#' Handle POST /sessions/{id}/reset
-#' @keywords internal
-handle_reset_session <- function(session_id) {
-  session <- .mrp_env$sessions[[session_id]]
-  if (is.null(session)) {
-    return(list(error = sprintf("Session %s not found", session_id), status = 404L))
-  }
-
-  # Create fresh environment
-  session$env <- new.env(parent = globalenv())
-  session$execution_count <- 0L
-  session$last_activity <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
-
-  list(reset = TRUE)
+handle_reset <- function() {
+  reset_runtime()
+  list(success = TRUE)
 }
 
 # Null-coalescing operator

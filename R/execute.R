@@ -6,7 +6,6 @@
 #' @keywords internal
 handle_execute <- function(body) {
   code <- body$code %||% ""
-  session_id <- body$session %||% "default"
   store_history <- body$storeHistory %||% TRUE
   exec_id <- body$execId %||% sprintf("exec-%s", as.numeric(Sys.time()))
 
@@ -16,15 +15,14 @@ handle_execute <- function(body) {
     asset_dir <- file.path(.mrp_env$cwd, "_assets")
   }
 
-  session <- get_or_create_session(session_id)
-  execute_code(session, code, store_history, exec_id, asset_dir)
+  runtime <- get_runtime()
+  execute_code(runtime, code, store_history, exec_id, asset_dir)
 }
 
 #' Handle POST /execute/stream (SSE)
 #' @keywords internal
 handle_execute_stream <- function(body, cors_headers) {
   code <- body$code %||% ""
-  session_id <- body$session %||% "default"
   store_history <- body$storeHistory %||% TRUE
   exec_id <- body$execId %||% sprintf("exec-%s", as.numeric(Sys.time()))
 
@@ -34,7 +32,7 @@ handle_execute_stream <- function(body, cors_headers) {
     asset_dir <- file.path(.mrp_env$cwd, "_assets")
   }
 
-  session <- get_or_create_session(session_id)
+  runtime <- get_runtime()
 
   # Return SSE response
   # httpuv doesn't have native SSE support, so we use a custom approach
@@ -56,7 +54,7 @@ handle_execute_stream <- function(body, cors_headers) {
   )))
 
   # Execute with streaming callbacks
-  result <- execute_code_streaming(session, code, store_history, exec_id, asset_dir,
+  result <- execute_code_streaming(runtime, code, store_history, exec_id, asset_dir,
     on_output = function(stream, content, accumulated) {
       events <<- c(events, format_sse_event(stream, list(
         content = content,
@@ -96,18 +94,18 @@ format_sse_event <- function(event_type, data) {
 
 #' Execute code and return result
 #' @keywords internal
-execute_code <- function(session, code, store_history, exec_id, asset_dir) {
-  execute_code_streaming(session, code, store_history, exec_id, asset_dir,
+execute_code <- function(runtime, code, store_history, exec_id, asset_dir) {
+  execute_code_streaming(runtime, code, store_history, exec_id, asset_dir,
     on_output = NULL, on_display = NULL, on_asset = NULL)
 }
 
 #' Execute code with streaming callbacks
 #' @keywords internal
-execute_code_streaming <- function(session, code, store_history, exec_id, asset_dir,
+execute_code_streaming <- function(runtime, code, store_history, exec_id, asset_dir,
                                    on_output = NULL, on_display = NULL, on_asset = NULL) {
   start_time <- Sys.time()
-  session$current_exec_id <- exec_id
-  session$interrupted <- FALSE
+  runtime$current_exec_id <- exec_id
+  runtime$interrupted <- FALSE
 
   # Prepare asset directory
   if (!is.null(asset_dir) && nchar(asset_dir) > 0) {
@@ -161,16 +159,16 @@ execute_code_streaming <- function(session, code, store_history, exec_id, asset_
   error_info <- NULL
   eval_result <- NULL
 
-  # Change to session working directory
+  # Change to runtime working directory
   old_wd <- getwd()
-  setwd(session$env$.mrmd_cwd %||% .mrp_env$cwd)
+  setwd(runtime$env$.mrmd_cwd %||% .mrp_env$cwd)
   on.exit(setwd(old_wd), add = TRUE)
 
   tryCatch({
     # Evaluate the code
     eval_result <- evaluate::evaluate(
       code,
-      envir = session$env,
+      envir = runtime$env,
       stop_on_error = 0,  # Don't stop on error, capture it
       keep_warning = TRUE,
       keep_message = TRUE,
@@ -284,12 +282,26 @@ execute_code_streaming <- function(session, code, store_history, exec_id, asset_
     }
   }
 
-  # Update session
+  # Update runtime state
   if (store_history) {
-    session$execution_count <- session$execution_count + 1L
+    runtime$execution_count <- runtime$execution_count + 1L
+
+    history_index <- runtime$history_next_index %||% 1L
+    entry <- list(
+      historyIndex = history_index,
+      code = code
+    )
+
+    runtime$history[[length(runtime$history) + 1L]] <- entry
+    runtime$history_next_index <- history_index + 1L
+
+    tryCatch(
+      append_history_entry(runtime$history_file, history_index, code),
+      error = function(e) NULL
+    )
   }
-  session <- touch_session(session)
-  session$current_exec_id <- NULL
+  touch_runtime()
+  runtime$current_exec_id <- NULL
 
   # Build asset list from plot files
   for (filepath in plot_files) {
@@ -323,7 +335,7 @@ execute_code_streaming <- function(session, code, store_history, exec_id, asset_
     error = error_info,
     displayData = display_data,
     assets = assets,
-    executionCount = session$execution_count,
+    executionCount = runtime$execution_count,
     duration = duration
   )
 }
@@ -331,7 +343,6 @@ execute_code_streaming <- function(session, code, store_history, exec_id, asset_
 #' Handle POST /input
 #' @keywords internal
 handle_input <- function(body) {
-  session_id <- body$session %||% "default"
   exec_id <- body$exec_id
   text <- body$text %||% ""
 
@@ -340,10 +351,9 @@ handle_input <- function(body) {
   }
 
   # Store input for pending request
-  key <- paste(session_id, exec_id, sep = ":")
-  if (key %in% names(.mrp_env$pending_inputs)) {
-    .mrp_env$input_values[[key]] <- text
-    .mrp_env$pending_inputs[[key]] <- TRUE
+  if (exec_id %in% names(.mrp_env$pending_inputs)) {
+    .mrp_env$input_values[[exec_id]] <- text
+    .mrp_env$pending_inputs[[exec_id]] <- TRUE
     return(list(accepted = TRUE))
   }
 
@@ -353,17 +363,15 @@ handle_input <- function(body) {
 #' Handle POST /input/cancel
 #' @keywords internal
 handle_input_cancel <- function(body) {
-  session_id <- body$session %||% "default"
   exec_id <- body$exec_id
 
   if (is.null(exec_id)) {
     return(list(cancelled = FALSE, error = "exec_id is required", status = 400L))
   }
 
-  key <- paste(session_id, exec_id, sep = ":")
-  if (key %in% names(.mrp_env$pending_inputs)) {
-    .mrp_env$pending_inputs[[key]] <- NULL
-    .mrp_env$input_values[[key]] <- NULL
+  if (exec_id %in% names(.mrp_env$pending_inputs)) {
+    .mrp_env$pending_inputs[[exec_id]] <- NULL
+    .mrp_env$input_values[[exec_id]] <- NULL
     return(list(cancelled = TRUE))
   }
 
@@ -373,15 +381,7 @@ handle_input_cancel <- function(body) {
 #' Handle POST /interrupt
 #' @keywords internal
 handle_interrupt <- function(body) {
-  session_id <- body$session %||% "default"
-  session <- .mrp_env$sessions[[session_id]]
-
-  if (is.null(session)) {
-    return(list(interrupted = FALSE, error = "Session not found", status = 404L))
-  }
-
-  # Set interrupt flag
-  session$interrupted <- TRUE
-
+  runtime <- get_runtime()
+  runtime$interrupted <- TRUE
   list(interrupted = TRUE)
 }

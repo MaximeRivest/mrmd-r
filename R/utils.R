@@ -6,7 +6,6 @@
 #' @keywords internal
 handle_is_complete <- function(body) {
   code <- body$code %||% ""
-  session_id <- body$session %||% "default"
 
   # Try to parse the code
   result <- tryCatch({
@@ -54,6 +53,73 @@ handle_format <- function(body) {
       error = "Formatting not available (install 'styler' package)"
     )
   }
+}
+
+#' Handle POST /history
+#' @keywords internal
+handle_history <- function(body) {
+  runtime <- get_runtime()
+
+  n <- body$n %||% 20L
+  pattern <- body$pattern %||% NULL
+  before <- body$before %||% NULL
+
+  n <- suppressWarnings(as.integer(n))
+  if (is.na(n) || n <= 0L) {
+    n <- 20L
+  }
+
+  entries <- runtime$history
+  if (length(entries) == 0) {
+    return(list(entries = list(), hasMore = FALSE))
+  }
+
+  if (!is.null(before)) {
+    before <- suppressWarnings(as.integer(before))
+    if (!is.na(before)) {
+      entries <- Filter(function(entry) {
+        isTRUE(entry$historyIndex < before)
+      }, entries)
+    }
+  }
+
+  if (!is.null(pattern) && nzchar(pattern)) {
+    rx <- mrp_glob_to_regex(pattern)
+    entries <- Filter(function(entry) {
+      code <- entry$code %||% ""
+      isTRUE(grepl(rx, code, perl = TRUE))
+    }, entries)
+  }
+
+  total <- length(entries)
+  if (total == 0) {
+    return(list(entries = list(), hasMore = FALSE))
+  }
+
+  start <- max(1L, total - n + 1L)
+  list(
+    entries = entries[start:total],
+    hasMore = start > 1L
+  )
+}
+
+#' Convert a simple glob pattern to a regex
+#' @keywords internal
+mrp_glob_to_regex <- function(pattern) {
+  chars <- strsplit(pattern %||% "", "", fixed = TRUE)[[1]]
+  escaped <- vapply(chars, function(ch) {
+    if (identical(ch, "*")) {
+      ".*"
+    } else if (identical(ch, "?")) {
+      "."
+    } else if (grepl("[][{}()+^$.|\\\\]", ch, perl = TRUE)) {
+      paste0("\\", ch)
+    } else {
+      ch
+    }
+  }, character(1))
+
+  paste0("(?s)^", paste(escaped, collapse = ""), "$")
 }
 
 #' Handle GET /assets/{path}

@@ -7,9 +7,8 @@
 handle_complete <- function(body) {
   code <- body$code %||% ""
   cursor <- body$cursor %||% nchar(code)
-  session_id <- body$session %||% "default"
 
-  session <- get_or_create_session(session_id)
+  runtime <- get_runtime()
 
   # Extract the text being completed
   text_before <- substr(code, 1, cursor)
@@ -40,7 +39,7 @@ handle_complete <- function(body) {
   cursor_start <- last_match_start
 
   # Get completions
-  completions <- get_completions(token, session$env)
+  completions <- get_completions(token, runtime$env)
 
   list(
     matches = completions,
@@ -168,10 +167,9 @@ get_completions <- function(token, env) {
 handle_inspect <- function(body) {
   code <- body$code %||% ""
   cursor <- body$cursor %||% nchar(code)
-  session_id <- body$session %||% "default"
   detail_level <- body$detail %||% 0
 
-  session <- get_or_create_session(session_id)
+  runtime <- get_runtime()
 
   # Extract symbol at cursor
   symbol <- extract_symbol_at_cursor(code, cursor)
@@ -182,7 +180,7 @@ handle_inspect <- function(body) {
 
   # Try to get the object
   obj <- tryCatch(
-    eval(parse(text = symbol), envir = session$env),
+    eval(parse(text = symbol), envir = runtime$env),
     error = function(e) NULL
   )
 
@@ -250,9 +248,8 @@ handle_inspect <- function(body) {
 handle_hover <- function(body) {
   code <- body$code %||% ""
   cursor <- body$cursor %||% nchar(code)
-  session_id <- body$session %||% "default"
 
-  session <- get_or_create_session(session_id)
+  runtime <- get_runtime()
 
   # Extract symbol at cursor
   symbol <- extract_symbol_at_cursor(code, cursor)
@@ -263,7 +260,7 @@ handle_hover <- function(body) {
 
   # Try to get the object
   obj <- tryCatch(
-    eval(parse(text = symbol), envir = session$env),
+    eval(parse(text = symbol), envir = runtime$env),
     error = function(e) NULL
   )
 

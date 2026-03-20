@@ -1,17 +1,16 @@
 #' Variable Inspection
 #'
-#' Functions for listing and inspecting session variables.
+#' Functions for listing and inspecting runtime variables.
 
 #' Handle POST /variables
 #' @keywords internal
 handle_variables <- function(body) {
-  session_id <- body$session %||% "default"
   filter <- body$filter %||% list()
 
-  session <- get_or_create_session(session_id)
+  runtime <- get_runtime()
 
-  # Get all variables in session environment
-  var_names <- ls(session$env, all.names = FALSE)
+  # Get all variables in runtime environment
+  var_names <- ls(runtime$env, all.names = FALSE)
 
   # Apply filters
   if (!is.null(filter$excludePrivate) && filter$excludePrivate) {
@@ -26,14 +25,14 @@ handle_variables <- function(body) {
   if (!is.null(filter$types)) {
     allowed_types <- unlist(filter$types)
     var_names <- Filter(function(name) {
-      obj <- get(name, envir = session$env)
+      obj <- get(name, envir = runtime$env)
       class(obj)[1] %in% allowed_types
     }, var_names)
   }
 
   # Build variable list
   variables <- lapply(var_names, function(name) {
-    obj <- get(name, envir = session$env)
+    obj <- get(name, envir = runtime$env)
     build_variable_info(name, obj)
   })
 
@@ -53,15 +52,14 @@ handle_variables <- function(body) {
 #' Handle POST /variables/{name}
 #' @keywords internal
 handle_variable_detail <- function(var_name, body) {
-  session_id <- body$session %||% "default"
   path <- body$path %||% list()
   max_children <- body$maxChildren %||% 100
   max_value_length <- body$maxValueLength %||% 1000
 
-  session <- get_or_create_session(session_id)
+  runtime <- get_runtime()
 
   # Get the base variable
-  if (!exists(var_name, envir = session$env)) {
+  if (!exists(var_name, envir = runtime$env)) {
     return(list(
       name = var_name,
       type = "undefined",
@@ -70,7 +68,7 @@ handle_variable_detail <- function(var_name, body) {
     ))
   }
 
-  obj <- get(var_name, envir = session$env)
+  obj <- get(var_name, envir = runtime$env)
 
   # Navigate path
   for (key in path) {
