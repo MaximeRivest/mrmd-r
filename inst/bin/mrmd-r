@@ -51,17 +51,20 @@ if (!loaded) {
   cat("Package root:", pkg_root, "\n")
 
   if (file.exists(file.path(pkg_root, "DESCRIPTION"))) {
+    options(mrmdr.package_root = pkg_root)
+
     # Load dependencies
     suppressPackageStartupMessages({
       library(httpuv)
       library(jsonlite)
       library(evaluate)
       library(later)
+      library(callr)
     })
 
-    # Source all R files in correct order (server.R depends on others)
+    # Source all R files in the same order used by the worker bootstrap.
     r_dir <- file.path(pkg_root, "R")
-    source_order <- c("session.R", "execute.R", "complete.R", "variables.R", "utils.R", "server.R")
+    source_order <- c("server.R", "runtime.R", "execute.R", "complete.R", "variables.R", "utils.R")
 
     for (f in source_order) {
       fpath <- file.path(r_dir, f)

@@ -5,6 +5,18 @@
 #' Handle POST /complete
 #' @keywords internal
 handle_complete <- function(body) {
+  if (!isTRUE(.mrp_env$is_worker)) {
+    runtime <- get_runtime()
+    touch_runtime()
+    return(worker_dispatch_sync(runtime, "handle_complete_local", body = body))
+  }
+
+  handle_complete_local(body)
+}
+
+#' Handle POST /complete inside the worker
+#' @keywords internal
+handle_complete_local <- function(body) {
   code <- body$code %||% ""
   cursor <- body$cursor %||% nchar(code)
 
@@ -165,6 +177,18 @@ get_completions <- function(token, env) {
 #' Handle POST /inspect
 #' @keywords internal
 handle_inspect <- function(body) {
+  if (!isTRUE(.mrp_env$is_worker)) {
+    runtime <- get_runtime()
+    touch_runtime()
+    return(worker_dispatch_sync(runtime, "handle_inspect_local", body = body))
+  }
+
+  handle_inspect_local(body)
+}
+
+#' Handle POST /inspect inside the worker
+#' @keywords internal
+handle_inspect_local <- function(body) {
   code <- body$code %||% ""
   cursor <- body$cursor %||% nchar(code)
   detail_level <- body$detail %||% 0
@@ -246,6 +270,18 @@ handle_inspect <- function(body) {
 #' Handle POST /hover
 #' @keywords internal
 handle_hover <- function(body) {
+  if (!isTRUE(.mrp_env$is_worker)) {
+    runtime <- get_runtime()
+    touch_runtime()
+    return(worker_dispatch_sync(runtime, "handle_hover_local", body = body))
+  }
+
+  handle_hover_local(body)
+}
+
+#' Handle POST /hover inside the worker
+#' @keywords internal
+handle_hover_local <- function(body) {
   code <- body$code %||% ""
   cursor <- body$cursor %||% nchar(code)
 

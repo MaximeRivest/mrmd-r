@@ -58,6 +58,18 @@ handle_format <- function(body) {
 #' Handle POST /history
 #' @keywords internal
 handle_history <- function(body) {
+  if (!isTRUE(.mrp_env$is_worker)) {
+    runtime <- get_runtime()
+    touch_runtime()
+    return(worker_dispatch_sync(runtime, "handle_history_local", body = body))
+  }
+
+  handle_history_local(body)
+}
+
+#' Handle POST /history inside the worker
+#' @keywords internal
+handle_history_local <- function(body) {
   runtime <- get_runtime()
 
   n <- body$n %||% 20L

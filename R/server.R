@@ -12,6 +12,8 @@
 .mrp_env$runtime <- NULL
 .mrp_env$pending_inputs <- list()
 .mrp_env$input_values <- list()
+.mrp_env$is_worker <- FALSE
+.mrp_env$package_root <- NULL
 
 #' Start the MRP server
 #'
@@ -21,9 +23,11 @@
 #' @param blocking If TRUE, block until server is stopped (default: TRUE)
 #' @export
 start_server <- function(host = "127.0.0.1", port = 8001, cwd = getwd(), blocking = TRUE) {
+  .mrp_env$is_worker <- FALSE
   .mrp_env$cwd <- normalizePath(cwd, mustWork = FALSE)
   .mrp_env$r_version <- paste(R.version$major, R.version$minor, sep = ".")
   .mrp_env$r_executable <- file.path(R.home("bin"), "R")
+  .mrp_env$package_root <- get_package_root()
 
   message(sprintf("Starting mrmd-r server..."))
   message(sprintf("  Host: %s", host))
@@ -48,7 +52,7 @@ start_server <- function(host = "127.0.0.1", port = 8001, cwd = getwd(), blockin
   if (blocking) {
     on.exit({
       message("\nShutting down...")
-      httpuv::stopServer(server)
+      stop_server()
     })
 
     # Run the event loop
@@ -64,12 +68,18 @@ start_server <- function(host = "127.0.0.1", port = 8001, cwd = getwd(), blockin
 #' Stop the MRP server
 #' @export
 stop_server <- function() {
+  runtime <- .mrp_env$runtime
+  if (!is.null(runtime) && !is.null(runtime$session)) {
+    stop_worker_session(runtime$session)
+  }
+
   if (!is.null(.mrp_env$server)) {
     httpuv::stopServer(.mrp_env$server)
     .mrp_env$server <- NULL
-    .mrp_env$runtime <- NULL
-    message("Server stopped.")
   }
+
+  .mrp_env$runtime <- NULL
+  message("Server stopped.")
 }
 
 #' Route incoming HTTP requests
@@ -209,7 +219,20 @@ handle_capabilities <- function() {
 #' Handle POST /reset
 #' @keywords internal
 handle_reset <- function() {
-  reset_runtime()
+  if (isTRUE(.mrp_env$is_worker)) {
+    return(handle_reset_local())
+  }
+
+  runtime <- get_runtime()
+  worker_dispatch_sync(runtime, "handle_reset_local")
+  touch_runtime()
+  list(success = TRUE)
+}
+
+#' Handle POST /reset inside the worker
+#' @keywords internal
+handle_reset_local <- function() {
+  init_runtime_local()
   list(success = TRUE)
 }
 

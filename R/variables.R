@@ -5,6 +5,18 @@
 #' Handle POST /variables
 #' @keywords internal
 handle_variables <- function(body) {
+  if (!isTRUE(.mrp_env$is_worker)) {
+    runtime <- get_runtime()
+    touch_runtime()
+    return(worker_dispatch_sync(runtime, "handle_variables_local", body = body))
+  }
+
+  handle_variables_local(body)
+}
+
+#' Handle POST /variables inside the worker
+#' @keywords internal
+handle_variables_local <- function(body) {
   filter <- body$filter %||% list()
 
   runtime <- get_runtime()
@@ -52,6 +64,18 @@ handle_variables <- function(body) {
 #' Handle POST /variables/{name}
 #' @keywords internal
 handle_variable_detail <- function(var_name, body) {
+  if (!isTRUE(.mrp_env$is_worker)) {
+    runtime <- get_runtime()
+    touch_runtime()
+    return(worker_dispatch_sync(runtime, "handle_variable_detail_local", var_name = var_name, body = body))
+  }
+
+  handle_variable_detail_local(var_name, body)
+}
+
+#' Handle POST /variables/{name} inside the worker
+#' @keywords internal
+handle_variable_detail_local <- function(var_name, body) {
   path <- body$path %||% list()
   max_children <- body$maxChildren %||% 100
   max_value_length <- body$maxValueLength %||% 1000

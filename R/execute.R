@@ -5,6 +5,19 @@
 #' Handle POST /execute
 #' @keywords internal
 handle_execute <- function(body) {
+  if (isTRUE(.mrp_env$is_worker)) {
+    return(handle_execute_local(body))
+  }
+
+  runtime <- get_runtime()
+  worker_dispatch_async(runtime, "handle_execute_local", body = body)
+  touch_runtime()
+  worker_wait(runtime, pump_http = TRUE)
+}
+
+#' Handle POST /execute inside the worker
+#' @keywords internal
+handle_execute_local <- function(body) {
   code <- body$code %||% ""
   store_history <- body$storeHistory %||% TRUE
   exec_id <- body$execId %||% sprintf("exec-%s", as.numeric(Sys.time()))
@@ -23,20 +36,12 @@ handle_execute <- function(body) {
 #' @keywords internal
 handle_execute_stream <- function(body, cors_headers) {
   code <- body$code %||% ""
-  store_history <- body$storeHistory %||% TRUE
   exec_id <- body$execId %||% sprintf("exec-%s", as.numeric(Sys.time()))
-
-  # Default asset_dir to {cwd}/_assets if not provided
-  asset_dir <- body$assetDir
-  if (is.null(asset_dir) || nchar(asset_dir) == 0) {
-    asset_dir <- file.path(.mrp_env$cwd, "_assets")
-  }
-
   runtime <- get_runtime()
 
   # Return SSE response
   # httpuv doesn't have native SSE support, so we use a custom approach
-  # We'll execute and stream events
+  # We execute in the worker, then return SSE-compatible events.
 
   headers <- c(cors_headers, list(
     "Content-Type" = "text/event-stream",
@@ -53,30 +58,46 @@ handle_execute_stream <- function(body, cors_headers) {
     timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
   )))
 
-  # Execute with streaming callbacks
-  result <- execute_code_streaming(runtime, code, store_history, exec_id, asset_dir,
-    on_output = function(stream, content, accumulated) {
-      events <<- c(events, format_sse_event(stream, list(
-        content = content,
-        accumulated = accumulated
+  worker_dispatch_async(runtime, "handle_execute_local", body = body)
+  result <- worker_wait(runtime, pump_http = TRUE)
+
+  if (nzchar(result$stdout %||% "")) {
+    events <- c(events, format_sse_event("stdout", list(
+      content = result$stdout,
+      accumulated = result$stdout
+    )))
+  }
+
+  if (nzchar(result$stderr %||% "")) {
+    events <- c(events, format_sse_event("stderr", list(
+      content = result$stderr,
+      accumulated = result$stderr
+    )))
+  }
+
+  if (length(result$displayData %||% list()) > 0) {
+    for (display in result$displayData) {
+      events <- c(events, format_sse_event("display", list(
+        data = display$data %||% list(),
+        metadata = display$metadata %||% list()
       )))
-    },
-    on_display = function(data, metadata) {
-      events <<- c(events, format_sse_event("display", list(
-        data = data,
-        metadata = metadata
-      )))
-    },
-    on_asset = function(asset) {
-      events <<- c(events, format_sse_event("asset", asset))
     }
-  )
+  }
 
-  # Result event
-  events <- c(events, format_sse_event("result", result))
+  if (length(result$assets %||% list()) > 0) {
+    for (asset in result$assets) {
+      events <- c(events, format_sse_event("asset", asset))
+    }
+  }
 
-  # Done event
+  if (isTRUE(result$success)) {
+    events <- c(events, format_sse_event("result", result))
+  } else {
+    events <- c(events, format_sse_event("error", result$error %||% list()))
+  }
+
   events <- c(events, format_sse_event("done", list()))
+  touch_runtime()
 
   list(
     status = 200L,
@@ -88,7 +109,12 @@ handle_execute_stream <- function(body, cors_headers) {
 #' Format an SSE event
 #' @keywords internal
 format_sse_event <- function(event_type, data) {
-  json_data <- jsonlite::toJSON(data, auto_unbox = TRUE, null = "null")
+  json_data <- if (is.list(data) && length(data) == 0) {
+    "{}"
+  } else {
+    jsonlite::toJSON(data, auto_unbox = TRUE, null = "null")
+  }
+
   sprintf("event: %s\ndata: %s\n\n", event_type, json_data)
 }
 
@@ -252,6 +278,14 @@ execute_code_streaming <- function(runtime, code, store_history, exec_id, asset_
         }
       )
     )
+  }, interrupt = function(e) {
+    error_info <<- list(
+      type = "Interrupt",
+      message = "Interrupted",
+      traceback = list(),
+      line = NULL,
+      column = NULL
+    )
   }, error = function(e) {
     error_info <<- list(
       type = class(e)[1],
@@ -382,6 +416,16 @@ handle_input_cancel <- function(body) {
 #' @keywords internal
 handle_interrupt <- function(body) {
   runtime <- get_runtime()
-  runtime$interrupted <- TRUE
-  list(interrupted = TRUE)
+  session <- runtime$session
+
+  if (is.null(session) || !session$is_alive() || !identical(session$get_state(), "busy")) {
+    return(list(interrupted = FALSE))
+  }
+
+  interrupted <- tryCatch(
+    isTRUE(session$interrupt()),
+    error = function(e) FALSE
+  )
+
+  list(interrupted = interrupted)
 }
